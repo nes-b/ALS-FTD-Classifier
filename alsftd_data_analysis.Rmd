@@ -93,14 +93,18 @@ p2 <- ggplot(df, aes(y = pTau_tTau_ratio, x = dg_alsftd, fill = dg_alsftd)) +
 
 p3 <- ggplot(df, aes(y = log(phospho_tau), x = log(total_tau), fill = dg_alsftd)) + 
   geom_smooth(aes(fill = dg_alsftd), color = "grey30", linetype = 2, linewidth = 0.2, alpha = 0.2, method = mgcv::gam, se = TRUE) +
+  geom_hline(yintercept = log(57), linetype = 2, color = "grey50") + geom_vline(xintercept = log(400), linetype = 2, color = "grey50") +
   geom_point(size = 2, shape = 21, alpha = 0.7) +
   geom_abline(slope = 1, intercept = -2, linetype = 1, color = "grey50") + 
+  stat_cor(aes(color = dg_alsftd), method = "spearman", label.x = 4.5) +
   theme_bw() + theme(legend.position = "bottom") + 
   scale_fill_manual(values = c("red3","blue3","orange3","grey20")) +
+    scale_color_manual(values = c("red3","blue3","orange3","grey20")) +
   labs(x = "log(tTau)", y = "log(pTau)", fill = "")
 
-cowplot::plot_grid(plotlist = list(p1,p2,p3), cols = 3, align = "h")
+cowplot::plot_grid(plotlist = list(p1,p2,p3), cols = 3, align = "h", labels = "AUTO")
 ggsave("Figures/pTau_tTau_ratio_diagnosis.pdf", width = 13, height = 5)
+ggsave("Figures/pTau_tTau_ratio_diagnosis.png", width = 11, height = 4.5)
 
 # Summary statistics for pTau:tTau ratio by diagnosis
 df %>%
@@ -129,16 +133,14 @@ dat <- df
 
 # 3) Define feature sets (CSF + MRI). Adjust names to exactly match columns.
 csf_vars <- c(
-  "tplc_totalprotein_im_liquor","alblc_albumin_im_liquor","albsc_albumin_im_serum","albqc_albumin_quotient",
+    "zelllc_gesamtzellzahl","tplc_totalprotein_im_liquor","alblc_albumin_im_liquor",
+    "albsc_albumin_im_serum","albqc_albumin_quotient",
   "igglc_ig_g_im_liquor","iggsc_ig_g_im_serum","iggqc_ig_g_quotient","iggndc_ig_g_index",
   "igalc_ig_a_im_liquor","igasc_ig_a_im_serum","igaqc_ig_a_quotient",
-  "igmlc_ig_m_im_liquor","igmsc_ig_m_im_serum","igmqc_ig_m_quotient",
-  "zelllc_gesamtzellzahl",
-  "amyloid_b_1_42","amyloid_b_1_40","total_tau","phospho_tau",
+  "igmlc_ig_m_im_liquor","igmsc_ig_m_im_serum","igmqc_ig_m_quotient",   "csf_igg_iga_ratio",
+  "amyloid_b_1_42","amyloid_b_1_40","total_tau","phospho_tau", "ptau_ttau_ratio","pTau_tTau_ratio",
   "quotient_ab1_42_ab1_40","q_abeta42_p_tau",
-  "kapqc_kappa_quotient","kapndc_kappa_index","lamqc_lambda_quotient","lamndc_lambda_index",
-  "kaifc_kappa_if","iggif_ig_g_if","igaif_ig_a_if",
-  "ptau_ttau_ratio","csf_igg_iga_ratio"
+  "kapqc_kappa_quotient","kapndc_kappa_index","lamqc_lambda_quotient","lamndc_lambda_index"
 )
 
 demo_vars <- c(
@@ -250,9 +252,6 @@ pretty_names <- c(
   kapndc_kappa_index = "Kappa index",
   lamqc_lambda_quotient = "Q Lambda",
   lamndc_lambda_index = "Lambda index",
-  kaifc_kappa_if = "Kappa IF",
-  iggif_ig_g_if = "IgG IF",
-  igaif_ig_a_if = "IgA IF",
   ptau_ttau_ratio = "pTau:tTau",
   csf_igg_iga_ratio = "CSF IgG:IgA",
   # MRI
@@ -341,7 +340,7 @@ build_heatmap <- function(group_col, file_pdf) {
   )
 
   
-  pdf(file_pdf, width = ifelse(group_col == "diagnosis_label",5,3.5), height = 10)
+  pdf(file_pdf, width = ifelse(group_col == "diagnosis_label",4,3.5), height = 10)
   draw(ha_rows + ht, heatmap_legend_side = "right")
   dev.off()
 
@@ -437,6 +436,22 @@ combined_plot <- ggarrange(p1, p2, p3, p4, p5, p6,
                            legend = "bottom")   
 print(combined_plot)
 ggsave("Figures/pTau_tTau_correlation.pdf", width = 11, height = 10)
+```
+
+
+```{r}
+ggscatter(df, x = "csf_igg_iga_ratio", 
+                y = "albqc_albumin_quotient",
+                add = "reg.line",                       
+                color = "dg_alsftd", 
+                size = 0.75,
+                add.params = list(alpha = 0.2),
+                ggtheme = theme_bw(),
+                conf.int = T,
+                palette = c("red3", "blue3", "orange3", "grey20")
+) +
+  stat_cor(aes(color = dg_alsftd), method = "spearman", label.x = 0.18) +
+    labs(x = "CSF IgG:IgA Ratio", y = "QAlb")
 ```
 
 
@@ -1167,165 +1182,76 @@ summary_stats <- auc_data %>%
 print(summary_stats, digits = 4)
 ```
 
+# 9 CSF IgG:IgA Ratio Analysis
+```{r fig.height=5, fig.width=13, message=FALSE, warning=FALSE}
+my_comparisons <- list( c("ALS/FTD", "4R_Tau"), c("ALS/FTD", "AD"), c("ALS/FTD", "other"), c("4R_Tau", "AD"), c("4R_Tau", "other"), c("AD", "other"))
+df$csf_ratio <- df$igglc_ig_g_im_liquor / df$igalc_ig_a_im_liquor
+
+p1 <- ggplot(df, aes(y = csf_ratio, x = diagnosis_label, fill = diagnosis_label)) + 
+  geom_boxplot(alpha = 0.6, outlier.alpha = 0) + geom_beeswarm(size = 1) + 
+  theme_bw() + theme(legend.position = "bottom") +  
+  stat_compare_means(ref.group = "4R_Tau", aes(label = after_stat(p.signif)), method = "wilcox") + 
+  scale_fill_manual(values = c("red2","red3","blue3","orange3","darkgreen","grey40", "grey20"))  +
+  labs(x = "Diagnosis Label", y = "CSF IgG:IgA", fill = "")
+
+p2 <- ggplot(df, aes(y = csf_ratio, x = dg_alsftd, fill = dg_alsftd)) + 
+  geom_boxplot(alpha = 0.6, outlier.alpha = 0) + geom_beeswarm(size = 1) +
+  theme_bw() + theme(legend.position = "bottom") +  
+  stat_compare_means(comparisons = my_comparisons, aes(label = after_stat(p.signif)), show.legend = T, method = "wilcox") + 
+  scale_fill_manual(values = c("red3","blue3","orange3","grey20")) +
+  labs(x = "Diagnosis Label (Grouped)", y = "CSF IgG:IgA", fill = "")
+
+p3 <- ggplot(df, aes(y = csf_ratio, x = log(albqc_albumin_quotient), fill = dg_alsftd)) + 
+  geom_smooth(aes(fill = dg_alsftd), color = "grey30", linetype = 2, linewidth = 0.2, alpha = 0.2, method = mgcv::gam, se = TRUE) +
+  geom_point(size = 2, shape = 21, alpha = 0.7) +
+    stat_cor(aes(color = dg_alsftd), method = "spearman", label.x = 2) +
+  scale_fill_manual(values = c("red3","blue3","orange3","grey20")) +
+    scale_color_manual(values = c("red3","blue3","orange3","grey20")) +
+    theme_bw() + theme(legend.position = "bottom") + 
+  labs(x = "log(QAlb)", y = "CSF IgG:IgA", fill = "")
+
+
+cowplot::plot_grid(plotlist = list(p1,p2,p3), cols = 3, align = "h", labels = c('A','B','C'))
+ggsave("Figures/csf_igg_iga_ratio_diagnosis.pdf", width = 13, height = 5)
+ggsave("Figures/csf_igg_iga_ratio_diagnosis.png", width = 11, height = 4.5)
+```
+```{r fig.height=5, fig.width=13, message=FALSE, warning=FALSE}
+calculate_if <- function(csf_igmL, serum_iggL, qalb) {
+  qig <- csf_igmL / serum_iggL
+  qlim <- 0.93 * sqrt(qalb^2 + 6e-6) - 1.7e-3
+  ifrac <- (1 - (qlim / qig)) * 100
+  return(ifrac)
+}
+
+# Calculate IF for IgG and for IgA
+df$if_igg <- with(df, calculate_if(igglc_ig_g_im_liquor, iggsc_ig_g_im_serum, albqc_albumin_quotient))
+df$if_iga <- with(df, calculate_if(igalc_ig_a_im_liquor, igasc_ig_a_im_serum, albqc_albumin_quotient))
+
+##
+df$csf_ratio <- df$if_igg / df$if_iga
+df$csf_ratio <- ifelse(df$csf_ratio < 0, NA, df$csf_ratio)
+
+# Now plot IF IgG and IF IgA analogous to your previous plots:
+p_if_igg <- ggplot(df, aes(y = csf_ratio, x = diagnosis_label, fill = diagnosis_label)) +
+  geom_boxplot(alpha = 0.6, outlier.alpha = 0) + geom_beeswarm(size = 1) +
+  theme_bw() + theme(legend.position = "bottom") +  
+  stat_compare_means(ref.group = "ALS", aes(label = after_stat(p.signif)), method = "wilcox") +
+  scale_fill_manual(values = c("red2","red3","blue3","orange3","darkgreen","grey40", "grey20")) +
+  labs(x = "Diagnosis Label", y = "IF-IgG: IF-IgA", fill = "")
+
+p_if_iga <- ggplot(df, aes(y = csf_ratio, x = dg_alsftd, fill = dg_alsftd)) + 
+  geom_boxplot(alpha = 0.6, outlier.alpha = 0) + geom_beeswarm(size = 1) +
+  theme_bw() + theme(legend.position = "bottom") +  
+  stat_compare_means(comparisons = my_comparisons, aes(label = after_stat(p.signif)), show.legend = T, method = "wilcox") + 
+  scale_fill_manual(values = c("red3","blue3","orange3","grey20")) +
+  labs(x = "Diagnosis Label", y = "IF-IgG: IF-IgA", fill = "")
+
+
+# Combine and display
+cowplot::plot_grid(plotlist = list(p_if_igg, p_if_iga), cols = 2, align = "h", labels = c('D','E'))
+```
+
 
 ```{r}
 sessionInfo()
 ```
-
-
-@#############################
-# Excursion: 4R_Tau Models
-```{r fig.width=5, fig.height=3}
-df$dg_alsftd_numeric <- as.numeric(as.factor(df$dg_alsftd))
-df$tau_binary <- ifelse(df$dg_alsftd == c("4R_Tau"), 1, 0)
-
-feature_cols <- df %>% 
-  select_if(is.numeric) %>% 
-  select(-tau_binary, -als_ftd_binary, -dg_alsftd_numeric, -rn,  -time_to_event, -manifestation_year, # demographics
-    -alsfrs_score, -updrs_3_score, -edss_score, # clinical scores
-    -moca_score_1, -moca_score_2,-mmse_score_1, -mmse_score_2, 
-    -alsfrs_score, -updrs_3_score, # more scores
-    -medication_cognitive, -medication_parkinsonian, -medication_antidepressants, -medication_antipsychotics) %>% 
-  names()
-
-# Prepare matrices for XGBoost
-X <- as.matrix(df[, ..feature_cols])
-y <- df$tau_binary
-
-# Train XGBoost model
-xgb_model <- xgboost(
-  data = X,
-  label = y,
-  objective = "binary:logistic",
-  nrounds = 200,
-  max_depth = 10,
-  eta = 0.1,
-  subsample = 0.8,
-  colsample_bytree = 0.8,
-  verbose = 0,
-  seed = 123
-)
-
-# Get feature importance
-importance_matrix <- xgb.importance(
-  feature_names = colnames(X), 
-  model = xgb_model
-)
-
-importance_df <- importance_matrix %>%
-  slice_head(n = 20) %>%
-  mutate(Feature = reorder(Feature, Gain))
-
-ggplot(importance_df, aes(x = Gain, y = Feature)) +
-  geom_col(fill = "blue2",color = "grey4", alpha = 0.7, width =0.6) +
-  labs(title = "XGBoost Feature Importance",x = "Importance (Gain)", y = "Features") +
-  labs(title = "XGBoost: Demo + Clin + CSF + MRI",x = "Importance (Gain)", y = "Features") +
-  scale_y_discrete(labels = nice_labels) +
-   theme_bw()
-
-```
-
-
-# Train XGBoost
-```{r fig.height=3 fig.width= 3}
-set.seed(123)
-
-# Create train-test split with stratification
-train_indices <- createDataPartition(y = df$tau_binary, 
-                                     p = 0.65, 
-                                     list = FALSE, 
-                                     times = 1)
-
-# Split the data
-X_train <- X[train_indices, , drop = FALSE]
-X_test <- X[-train_indices, , drop = FALSE]
-y_train <- y[train_indices]
-y_test <- y[-train_indices]
-
-# Train simple model with only pTau_tTau_ratio on training data
-X_simple_trat_train <- X_train [, "pTau_tTau_ratio", drop = FALSE]
-X_simple_trat_test <- X_test[, "pTau_tTau_ratio", drop = FALSE]
-simple_model_trat <- xgboost(
-  data = X_simple_trat_train,
-  label = y_train,
-  objective = "binary:logistic",
-  nrounds = 500,
-  max_depth = 2,
-  eta = 0.1,
-  subsample = 0.8,
-  colsample_bytree = 0.8,
-  verbose = 0,
-  seed = 123
-)
-
-# Train simple model with only csf_igg_iga_ratio on training data
-X_simple_irat_train <- X_train [, "csf_rat_form", drop = FALSE]
-X_simple_irat_test <- X_test[, "csf_rat_form", drop = FALSE]
-simple_model_irat <- xgboost(
-  data = X_simple_irat_train,
-  label = y_train,
-  objective = "binary:logistic",
-  nrounds = 500,
-  max_depth = 2,
-  eta = 0.1,
-  subsample = 0.8,
-  colsample_bytree = 0.8,
-  verbose = 0,
-  seed = 123
-)
-
-# Train final XGBoost model on training data only
-final_features <- importance_df$Feature
-X_final_train <- X_train[, final_features, drop = FALSE]
-X_final_test <- X_test[, final_features, drop = FALSE]
-final_model <- xgboost(
-  data = X_final_train,
-  label = y_train,
-  objective = "binary:logistic",
-  nrounds = 500,
-  max_depth = 15,
-  eta = 0.1,
-  subsample = 0.8,
-  colsample_bytree = 0.8,
-  verbose = 0,
-  seed = 123
-)
-
-# Make predictions on TEST data only
-simple_predictions_trat <- predict(simple_model_trat, X_simple_trat_test)
-simple_predictions_irat <- predict(simple_model_irat, X_simple_irat_test)
-xgb_predictions <- predict(final_model, X_final_test)
-
-# Create ROC curves using TEST data
-roc_simple_trat <- roc(y_test, simple_predictions_trat)
-roc_simple_irat <- roc(y_test, simple_predictions_irat)
-roc_xgb <- roc(y_test, xgb_predictions)
-
-# Plot ROC curves
-plot(roc_simple_trat, col = "grey30", lwd = 2, 
-     main = "ROC Comparison (Test Set)")
-lines(roc_simple_irat, col = "lightblue", lwd = 2)
-lines(roc_xgb, col = "#ff7b7b", lwd = 2)
-
-# Add legend with AUC values
-legend("bottomright", 
-       legend = c(paste("pTau:tTau (AUC =", round(auc(roc_simple_trat), 3), ")"),
-                  paste("CSF IgG/IgA Ratio (AUC =", round(auc(roc_simple_irat), 3), ")"),
-                  paste("XGB (AUC =", round(auc(roc_xgb), 3), ")")),
-       col = c("grey30", "lightblue", "#ff7b7b"), 
-       lwd = 2)
-
-# Print performance summary
-cat("Training set size:", length(y_train), "\n")
-cat("Test set size:", length(y_test), "\n")
-cat("Test set positive rate:", round(mean(y_test), 3), "\n")
-cat("Simple model pTau_tTau test AUC:", round(auc(roc_simple_trat), 3), "\n")
-cat("Simple model CSF IgG/IgA x Age test AUC:", round(auc(roc_simple_irat), 3), "\n")
-cat("XGBoost model test AUC:", round(auc(roc_xgb), 3), "\n")
-cat("AUC improvement:", round(auc(roc_xgb) - auc(roc_simple), 3), "\n")
-```
-
-```{r}
-sessionInfo()
-```
-
