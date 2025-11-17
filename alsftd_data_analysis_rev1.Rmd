@@ -1,0 +1,1131 @@
+---
+title: "ALS/FTD data analysis"
+author: "Nils Briel"
+date: "2025-11-14"
+output: html_document
+---
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(readxl)
+library(tibble)
+library(janitor)
+library(gtsummary)
+library(lubridate)
+library(ggrepel)
+library(ggpubr)
+library(ggbeeswarm)
+library(broom)
+library(purrr)
+library(VIM)
+library(mice)
+library(naniar)
+library(caret)
+library(xgboost)
+library(pROC)
+library(SHAPforxgboost)
+library(cowplot)
+
+get_most_recent_obs <-
+  function(df, id_col, date_col = "eingangsdatum") {
+    df %>% group_by(across(all_of(id_col))) %>% slice_max(order_by = across(all_of(date_col)),
+                                                          n = 1,
+                                                          with_ties = FALSE)
+  }
+```
+
+# 1 Data preparation
+
+```{r fig.height=5, fig.width=13, message=FALSE, warning=FALSE}
+df <- readRDS("Daten/csf_ndd_ds_share.Rds") %>%
+  filter(zelllc_gesamtzellzahl <=5) %>%
+  mutate(onset_lp_time = as.duration(manifestation_year %--% year(entnahmedatum))%>% as.numeric())
+```
+
+# 2 Cohort characteristics
+
+```{r fig.height=5, fig.width=9, message=FALSE, warning=FALSE}
+table(df$diagnosis_label)
+table(df$diagnosis_label) %>% sum()
+table(get_most_recent_obs(df, "Pub_ID", "entnahmedatum")$diagnosis_label)
+table(get_most_recent_obs(df, "Pub_ID", "entnahmedatum")$diagnosis_label) %>% sum()
+df_s <- get_most_recent_obs(df, "Pub_ID", "entnahmedatum") 
+
+tbl_summary(
+  df_s,
+  include = c(age_at_manifestation,age_at_report, onset_lp_time,
+              sex,dm,aht,ckd,neoplastic,autoimmune, tbi),
+  by = c(diagnosis_label),
+  # type = list(dis_dur ~ "continuous"),
+    statistic = list(all_continuous() ~ "{mean} ({sd})", all_categorical() ~
+    "{n} ({p}%)"),
+  missing = "no") %>% 
+  add_n() %>% 
+  add_p() %>% 
+  modify_header(label = "**Variable**") %>% 
+  bold_labels() %>%
+  add_overall(last = F)
+
+colnames(df_s)
+
+# define disease groups
+dg_alsftd <- function(x) {
+  if (x %in% c("ALS","FTD","ALS/FTD")) {
+    return("ALS/FTD")
+  } else if (x %in% c("4R_Tau")) {
+    return("4R_Tau")
+  } else if (x %in% c("AD","LBD","NPH","AD/LBD")) {
+    return("DC")
+  } else {
+    return("NCA")
+  }
+}
+df$dg_alsftd <- sapply(df$diagnosis_label, dg_alsftd) %>% factor(levels = c("ALS/FTD","4R_Tau","DC","NCA"))
+```
+
+# 3 Stats
+
+## 3.1 pTau:tTau Ratio
+
+```{r fig.height=5, fig.width=13, message=FALSE, warning=FALSE}
+my_comparisons <- list( c("ALS/FTD", "4R_Tau"), c("ALS/FTD", "DC"), c("ALS/FTD", "NCA"), c("4R_Tau", "DC"), c("4R_Tau", "NCA"))
+
+p1 <- ggplot(df, aes(y = pTau_tTau_ratio, x = diagnosis_label, fill = diagnosis_label)) + 
+  geom_boxplot(alpha = 0.6, outlier.alpha = 0) + geom_beeswarm(size = 1, shape =21) + 
+  theme_bw() + theme(legend.position = "bottom") +  
+  stat_compare_means(ref.group = "ALS", aes(label = after_stat(p.signif)), method = "wilcox") + 
+  scale_fill_manual(values = c("red2","red3","blue3","orange3","darkgreen","green4", "grey20"))  +
+  labs(x = "Diagnosis Label", y = "pTau:tTau Ratio", fill = "")
+
+p2 <- ggplot(df, aes(y = pTau_tTau_ratio, x = dg_alsftd, fill = dg_alsftd)) + 
+  geom_boxplot(alpha = 0.6, outlier.alpha = 0) + geom_beeswarm(size = 1, shape =21) +
+  theme_bw() + theme(legend.position = "bottom") +  
+  stat_compare_means(comparisons = my_comparisons, aes(label = after_stat(p.signif)), show.legend = T, method = "wilcox") + 
+  scale_fill_manual(values = c("red3","blue3","orange3","grey20")) +
+  labs(x = "Diagnosis Label (Grouped)", y = "pTau:tTau Ratio", fill = "")
+
+p3 <- ggplot(df, aes(y = log(phospho_tau), x = log(total_tau), fill = dg_alsftd)) + 
+  geom_smooth(aes(fill = dg_alsftd), color = "grey30", linetype = 2, 
+              linewidth = 0.2, alpha = 0.2, method = mgcv::gam, se = TRUE) +
+  geom_hline(yintercept = log(57), linetype = 2, color = "grey50") + 
+  geom_vline(xintercept = log(400), linetype = 2, color = "grey50") +
+  geom_point(size = 1.5, shape = 21, alpha = 0.7) +
+  geom_abline(slope = 1, intercept = -2, linetype = 1, color = "grey50") + 
+  stat_cor(aes(color = dg_alsftd), method = "spearman", label.x = 4.5) +
+  theme_bw() + theme(legend.position = "bottom") + 
+  scale_fill_manual(values = c("red3","blue3","orange3","grey20")) +
+    scale_color_manual(values = c("red3","blue3","orange3","grey20")) +
+  labs(x = "log(tTau)", y = "log(pTau)", fill = "") + theme(legend.position = "none")
+
+cowplot::plot_grid(plotlist = list(p1,p2,p3), cols = 3, align = "h", labels = "AUTO")
+ggsave("Figures/pTau_tTau_ratio_diagnosis.pdf", width = 13, height = 5)
+ggsave("Figures/pTau_tTau_ratio_diagnosis.png", width = 11, height = 4.5)
+
+# Summary statistics for pTau:tTau ratio by diagnosis
+df %>%
+  group_by(dg_alsftd) %>%
+  summarise(
+    Mean = mean(pTau_tTau_ratio, na.rm = TRUE),
+    sd = sd(pTau_tTau_ratio, na.rm = TRUE),
+    Median = median(pTau_tTau_ratio, na.rm = TRUE),
+    iqr = IQR(pTau_tTau_ratio, na.rm = TRUE),
+    Max = max(pTau_tTau_ratio, na.rm = TRUE),
+    Min = min(pTau_tTau_ratio, na.rm = TRUE),
+    SEM = sd / sqrt(sum(!is.na(pTau_tTau_ratio)))
+  )
+```
+
+## 3.2 Heatmaps
+
+```{r fig.height=14, fig.width=12, message=FALSE, warning=FALSE}}
+# Packages
+pkgs <- c("tidyverse","readr","janitor","ComplexHeatmap","circlize","matrixStats","rstatix")
+to_install <- pkgs[!pkgs %in% installed.packages()[,1]]
+if(length(to_install)) install.packages(to_install)
+invisible(lapply(pkgs, library, character.only = TRUE))
+
+dat <- df
+csf_vars <- c(
+    "zelllc_gesamtzellzahl","tplc_totalprotein_im_liquor","alblc_albumin_im_liquor",
+    "albsc_albumin_im_serum","albqc_albumin_quotient",
+  "igglc_ig_g_im_liquor","iggsc_ig_g_im_serum","iggqc_ig_g_quotient","iggndc_ig_g_index",
+  "igalc_ig_a_im_liquor","igasc_ig_a_im_serum","igaqc_ig_a_quotient",
+  "igmlc_ig_m_im_liquor","igmsc_ig_m_im_serum","igmqc_ig_m_quotient",   "csf_igg_iga_ratio",
+  "amyloid_b_1_42","amyloid_b_1_40","total_tau","phospho_tau", "pTau_tTau_ratio",
+  "quotient_ab1_42_ab1_40","q_abeta42_p_tau",
+  "kapqc_kappa_quotient","kapndc_kappa_index","lamqc_lambda_quotient","lamndc_lambda_index"
+)
+
+demo_vars <- c( "age_at_report","age_at_manifestation","dis_dur","onset_lp_time", "dm","aht","ckd","tbi","neoplastic","autoimmune","moca_score_1","mmse_score_1")
+
+mri_vars <- c("mta_right","mta_left","gca","fazekas_grade","amyloid_angiopathy")
+demo <- as.character(demo_vars)
+csf_vars <- as.character(csf_vars)
+mri_vars <- as.character(mri_vars)
+
+# Final feature order: demo, CSF, MRI
+features <- c(demo, csf_vars, mri_vars)
+features <- as.character(features[!is.na(features)])  # Remove any NAs
+
+# Numeric conversion
+to_numeric <- function(x) {
+  x <- gsub(",", ".", x)
+  x <- gsub("\\s+", "", x)
+  suppressWarnings(as.numeric(x))
+}
+
+# Only convert existing columns
+existing_features <- features[features %in% names(dat)]
+dat <- dat %>% mutate(across(all_of(existing_features), to_numeric))
+
+# Helper: 1-vs-all stats
+one_vs_all <- function(df, var, group_col) {
+  d <- df %>% select(all_of(group_col), all_of(var)) %>% drop_na()
+  if(nrow(d) < 6) return(tibble(group=character(), var=var, p=NA_real_, q=NA_real_))
+  levs <- d %>% pull(all_of(group_col)) %>% as.factor() %>% levels()
+  res <- lapply(levs, function(g) {
+    x <- d %>% filter(.data[[group_col]] == g) %>% pull(all_of(var))
+    y <- d %>% filter(.data[[group_col]] != g) %>% pull(all_of(var))
+    if(length(x) < 3 || length(y) < 5) return(tibble(group=g, var=var, p=NA_real_))
+    pval <- tryCatch(wilcox.test(x, y)$p.value, error=function(e) NA_real_)
+    tibble(group=g, var=var, p=pval)
+  }) %>% bind_rows()
+  res %>% mutate(q = p.adjust(p, method="BH"))
+}
+
+stats_by <- function(df, vars, group_col) {
+  bind_rows(lapply(vars, function(v) one_vs_all(df, v, group_col))) %>%
+    mutate(grouping = group_col)
+}
+
+# Aggregation to matrices
+agg_matrix <- function(df, vars, group_col, fun = median) {
+  df %>%
+    select(all_of(group_col), all_of(vars)) %>%
+    group_by(.data[[group_col]]) %>%
+    summarize(across(all_of(vars), ~fun(.x, na.rm=TRUE)), .groups="drop") %>%
+    column_to_rownames(group_col) %>%
+    t() %>%
+    as.matrix()
+}
+
+# Scale rows
+scale_rows <- function(m) {
+  m2 <- t(scale(t(m)))
+  m2[is.na(m2)] <- 0
+  m2
+}
+
+# Pretty variable names
+pretty_names <- c(
+  # Demo
+  age_at_report = "Age (LP)",
+  age_at_manifestation = "Age (onset)",
+  dm = "Diabetes",
+  aht = "Hypertension",
+  ckd = "CKD",
+  tbi = "TBI",
+  neoplastic = "Neoplastic",
+  autoimmune = "Autoimmune",
+  moca_score_1 = "MoCA",
+  mmse_score_1 = "MMSE",
+  dis_dur = "Disease duration",
+  onset_lp_time = "Onset→LP time",
+  # CSF
+  tplc_totalprotein_im_liquor = "CSF total protein",
+  alblc_albumin_im_liquor = "CSF albumin",
+  albsc_albumin_im_serum = "Serum albumin",
+  albqc_albumin_quotient = "Qalb",
+  igglc_ig_g_im_liquor = "CSF IgG",
+  iggsc_ig_g_im_serum = "Serum IgG",
+  iggqc_ig_g_quotient = "QIgG",
+  iggndc_ig_g_index = "IgG index",
+  igalc_ig_a_im_liquor = "CSF IgA",
+  igasc_ig_a_im_serum = "Serum IgA",
+  igaqc_ig_a_quotient = "QIgA",
+  igmlc_ig_m_im_liquor = "CSF IgM",
+  igmsc_ig_m_im_serum = "Serum IgM",
+  igmqc_ig_m_quotient = "QIgM",
+  iggif_ig_g_if = "IF IgG",
+  igaif_ig_a_if = "IF IgA",
+  zelllc_gesamtzellzahl = "CSF cells",
+  amyloid_b_1_42 = "CSF Aβ42",
+  amyloid_b_1_40 = "CSF Aβ40",
+  total_tau = "CSF tTau",
+  phospho_tau = "CSF pTau",
+  pTau_tTau_ratio = "CSF pTau:tTau",
+  quotient_ab1_42_ab1_40 = "CSF Aβ42/40",
+  q_abeta42_p_tau = "CSF Aβ42/pTau",
+  kapqc_kappa_quotient = "Q Kappa",
+  kapndc_kappa_index = "Kappa index",
+  lamqc_lambda_quotient = "Q Lambda",
+  lamndc_lambda_index = "Lambda index",
+  csf_igg_iga_ratio = "CSF IgG:IgA",
+  # MRI
+  mta_right = "MTA (R)",
+  mta_left  = "MTA (L)",
+  gca = "GCA",
+  fazekas_grade = "Fazekas",
+  amyloid_angiopathy = "CAA"
+)
+
+nice_row_names <- function(vars) {
+  nms <- pretty_names[vars]
+  nms <- ifelse(is.na(nms), vars, nms)
+  unname(nms)
+}
+
+# Build heatmap function with black boxes around variable blocks
+build_heatmap <- function(group_col, file_pdf) {
+  vars_present <- existing_features
+  st <- stats_by(dat, vars_present, group_col)
+  mat <- agg_matrix(dat, vars_present, group_col, median)
+  zmat <- scale_rows(mat)
+
+  # Asterisk matrix
+  q_tab <- st %>%
+    select(group, var, q) %>%
+    pivot_wider(names_from = group, values_from = q, values_fill = NA) %>%
+    column_to_rownames("var")
+
+  q_tab <- q_tab[rownames(zmat), colnames(zmat), drop=FALSE]
+
+  stars_from_q <- function(q) {
+    if(is.na(q)) return("")
+    if(q < 0.001) return("***")
+    if(q < 0.01)  return("**")
+    if(q < 0.05)  return("*")
+    ""
+  }
+
+  star_mat <- matrix("", nrow=nrow(zmat), ncol=ncol(zmat), dimnames = dimnames(zmat))
+  for(i in seq_len(nrow(zmat))) {
+    for(j in seq_len(ncol(zmat))) {
+      star_mat[i,j] <- stars_from_q(q_tab[i,j])
+    }
+  }
+
+  # Row order and blocks
+  row_order <- rownames(zmat)
+  row_block <- case_when(
+    row_order %in% demo ~ "Demo",
+    row_order %in% csf_vars ~ "CSF",
+    row_order %in% mri_vars ~ "MRI",
+    TRUE ~ "Other"
+  )
+
+  # Row annotation
+  ha_rows <- rowAnnotation(
+    Block = factor(row_block, levels = c("Demo","CSF","MRI","Other")),
+    col = list(Block = c(Demo="grey80", CSF="grey40", MRI="grey10", Other="#d9d9d9")),
+    width = unit(0.4, "cm")
+  )
+
+  # Colors
+  col_fun <- circlize::colorRamp2(c(-2, 0, 2), c("#004c4c","#f7f7f7","#de7a00"))
+
+  # Heatmap with black boxes around each row split block
+  ht <- Heatmap(
+    zmat,
+    name = "Z-score",
+    col = col_fun,
+    cluster_rows = FALSE,
+    cluster_columns = FALSE,
+    row_order = row_order,
+    column_title = paste(ifelse(group_col == "diagnosis_label", "Diagnoses", "Diagnoses Grouped")),
+    row_labels = nice_row_names(rownames(zmat)),
+    row_split = factor(row_block, levels = c("Demo","CSF","MRI","Other")),
+    row_gap = unit(3, "mm"),  
+    rect_gp = gpar(col = "black", lwd = 0.5),
+    border = TRUE,  
+    cell_fun = function(j, i, x, y, w, h, fill) {
+      lab <- star_mat[i, j]
+      if(nchar(lab) > 0) {
+        grid::grid.text(lab, x = x, y = y, gp = grid::gpar(fontsize = 10, col = "black", fontface = "bold"))
+      }
+    }
+  )
+
+  
+  pdf(file_pdf, width = ifelse(group_col == "diagnosis_label",4,3.5), height = 10)
+  draw(ha_rows + ht, heatmap_legend_side = "right")
+  dev.off()
+
+  cat("Saved:", file_pdf, "\n")
+}
+
+
+# Generate both heatmaps
+build_heatmap("diagnosis_label", "Figures/heatmap_diagnosis_label_stars.pdf")
+build_heatmap("dg_alsftd", "Figures/heatmap_dg_alsftd_stars.pdf")
+```
+
+```{r fig.height=10, fig.width=11, message=FALSE, warning=FALSE}
+# Load required libraries
+library(Hmisc)        # for rcorr()
+library(corrplot)     # for nice correlation plots
+library(ggcorrplot)
+
+# Assuming your data is in a data frame called 'df'
+# Numeric columns only: optionally subset if needed
+df_numeric <- df %>%
+  select_if(is.numeric) %>%
+  select(
+    -rn, -time_to_event, -manifestation_year, # demographics
+    -alsfrs_score, -updrs_3_score, -edss_score, # clinical scores
+    -medication_cognitive, -medication_parkinsonian, -medication_antidepressants, -medication_antipsychotics,
+    -mmse_score_1, -mmse_score_2, -moca_score_2 # cognitive scores
+   )
+
+# convert df_numeric colnames to pretty_names
+colnames(df_numeric) <- nice_row_names(colnames(df_numeric))
+# reorder columns 
+df_numeric <- df_numeric %>%
+  select(any_of(nice_row_names(demo_vars)),
+    nice_row_names(csf_vars),
+    nice_row_names(mri_vars)
+  )
+
+# Calculate Spearman correlations and get r and p separately
+cor_results <- rcorr(as.matrix(df_numeric), type = "spearman", )
+cor_matrix <- cor_results$r
+p_matrix <- cor_results$P
+
+corr <- round(cor(df_numeric, use = "pairwise.complete.obs", method = "spearman"), 2)
+p.mat <- cor_pmat(df_numeric, use = "pairwise.complete.obs", method = "spearman")
+
+# Plot the correlation matrix
+ggcorrplot(corr,
+           method = "square",     
+           type = "full",       
+           lab = TRUE,    
+           hc.order = F,
+           p.mat = p.mat,
+           title = "Spearman Correlation Matrix",
+           insig = "blank", 
+           colors = c("#6D9EC1", "white", "#E46726"),
+           pch.cex = 2,
+           )
+ggsave("Figures/feature_correlation_matrix.pdf", width = 16, height = 16)
+```
+
+# 4 Correlations
+
+```{r fig.height=10, fig.width=11, message=FALSE, warning=FALSE}
+p1 <- ggscatter(df, x = "pTau_tTau_ratio", 
+                y = "albsc_albumin_im_serum",
+                add = "reg.line",                       
+                color = "dg_alsftd", 
+                size = 0.75,
+                add.params = list(alpha = 0.2),
+                ggtheme = theme_bw(),
+                conf.int = T,
+                palette = c("red3", "blue3", "orange3", "grey20")
+) +
+  stat_cor(aes(color = dg_alsftd), method = "spearman", label.x = 0.15) +
+    labs(x = "pTau:tTau Ratio", y = "Albumin in Serum (g/L)")
+
+p2 <- ggscatter(df, x = "pTau_tTau_ratio", 
+                y = "albqc_albumin_quotient",
+                add = "reg.line",                       
+                color = "dg_alsftd", 
+                size = 0.75,
+                ggtheme = theme_bw(),
+                conf.int = T,
+                palette = c("red3", "blue3", "orange3", "grey20")
+) +
+  stat_cor(aes(color = dg_alsftd), method = "spearman", label.x = 0.15)+
+    labs(x = "pTau:tTau Ratio", y = "Albumin Quotient (CSF/Serum)")
+
+p3 <- ggscatter(df, x = "pTau_tTau_ratio", 
+                y = "gca",
+                add = "reg.line",                       
+                color = "dg_alsftd", 
+                size = 0.75,
+                ggtheme = theme_bw(),
+                conf.int = T,
+                palette = c("red3", "blue3", "orange3", "grey20")
+) +
+  stat_cor(aes(color = dg_alsftd), method = "spearman", label.x = 0.15)+
+    labs(x = "pTau:tTau Ratio", y = "GCA (Grade)")
+
+
+p4 <- ggscatter(df, x = "pTau_tTau_ratio", 
+                y = "mta_right",
+                add = "reg.line",                       
+                color = "dg_alsftd", 
+                size = 0.75,
+                ggtheme = theme_bw(),
+                conf.int = T,
+                palette = c("red3", "blue3", "orange3", "grey20")
+) +
+  stat_cor(aes(color = dg_alsftd), method = "spearman", label.x = 0.15)+
+    labs(x = "pTau:tTau Ratio", y = "MTA Right (Grade)")
+
+p5 <- ggscatter(df, x = "pTau_tTau_ratio", 
+                y = "mta_left",
+                add = "reg.line",                       
+                color = "dg_alsftd", 
+                size = 0.75,
+                ggtheme = theme_bw(),
+                conf.int = T,
+                palette = c("red3", "blue3", "orange3", "grey20")
+) +
+  stat_cor(aes(color = dg_alsftd), method = "spearman", label.x = 0.15)+
+    labs(x = "pTau:tTau Ratio", y = "MTA Left (Grade)")
+
+p6 <- ggscatter(df, x = "pTau_tTau_ratio", 
+                y = "fazekas_grade",
+                add = "reg.line",                       
+                color = "dg_alsftd", 
+                size = 0.75,
+                ggtheme = theme_bw(),
+                conf.int = T,
+                palette = c("red3", "blue3", "orange3", "grey20")
+) +
+  stat_cor(aes(color = dg_alsftd), method = "spearman", label.x = 0.15)+
+    labs(x = "pTau:tTau Ratio", y = "Fazekas Grade")
+
+combined_plot <- ggarrange(p1, p2, p3, p4, p5, p6,
+                           ncol = 2, nrow = 3,  
+                           common.legend = TRUE,
+                           legend = "bottom")   
+print(combined_plot)
+ggsave("Figures/pTau_tTau_correlation.pdf", width = 11, height = 10)
+```
+
+```{r}
+ggscatter(df, x = "csf_igg_iga_ratio", 
+                y = "albqc_albumin_quotient",
+                add = "reg.line",                       
+                color = "dg_alsftd", 
+                size = 0.75,
+                add.params = list(alpha = 0.2),
+                ggtheme = theme_bw(),
+                conf.int = T,
+                palette = c("red3", "blue3", "orange3", "grey20")
+) +
+  stat_cor(aes(color = dg_alsftd), method = "spearman", label.x = 0.18) +
+    labs(x = "CSF IgG:IgA Ratio", y = "QAlb")
+```
+
+# 5 ALS/FTD Models
+
+## 5.1 Regularized XGBoost with Feature Selection
+
+```{r fig.width=12, fig.height=5}
+# ====================================================================
+# ALS/FTD CLASSIFICATION WITH IMPROVED REGULARIZATION
+# ====================================================================
+# IMPLEMENTED:
+# 1. Proper MICE imputation - test set imputed using training parameters
+# 2. Strong regularization - lambda (L2), alpha (L1), gamma penalties
+# 3. Conservative hyperparameters - shallow trees (depth 2-3), low eta
+# 4. Balanced model selection - penalizes train-test gap in scoring
+# 
+# EXPECTED OUTCOME: balanced AUC / generalization to unseen data
+# ====================================================================
+
+library(parallel)
+library(doParallel)
+library(foreach)
+library(glmnet)
+
+#===== HELPER FUNCTIONS =====
+calc_metrics <- function(y_true, y_pred_prob, threshold = 0.5) {
+  y_pred <- ifelse(y_pred_prob > threshold, 1, 0)
+  cm <- confusionMatrix(factor(y_pred, levels = c(0, 1)), 
+                        factor(y_true, levels = c(0, 1)), 
+                        positive = "1")
+  roc_obj <- roc(y_true, y_pred_prob, quiet = TRUE)
+  
+  list(
+    Accuracy = as.numeric(cm$overall["Accuracy"]),
+    Sensitivity = as.numeric(cm$byClass["Sensitivity"]),
+    Specificity = as.numeric(cm$byClass["Specificity"]),
+    F1 = as.numeric(cm$byClass["F1"]),
+    AUC = as.numeric(auc(roc_obj)),
+    Precision = as.numeric(cm$byClass["Precision"])
+  )
+}
+
+# ===== STEP 1: PREPARE DATA & SPLIT =====
+df$alsftd_binary <- ifelse(df$dg_alsftd == "ALS/FTD", 1, 0)
+feature_cols_mri <- df %>% 
+  select_if(is.numeric) %>% 
+  select(
+    -alsftd_binary, -rn, -time_to_event, -manifestation_year, # demographics
+    -alsfrs_score, -updrs_3_score, -edss_score, -mmse_score_1, -moca_score_2, -mmse_score_2,
+    -medication_cognitive, -medication_parkinsonian, -medication_antidepressants, -medication_antipsychotics, -onset_lp_time,
+    -igaif_ig_a_if
+   ) %>% 
+  names()
+
+set.seed(456)  
+trainIndex <- createDataPartition(df$alsftd_binary, p = 0.75, list = FALSE)
+X_train_raw<- as.matrix(df[trainIndex, feature_cols_mri, with = FALSE])
+y_train<- df$alsftd_binary[trainIndex]
+X_test_raw <- as.matrix(df[-trainIndex, feature_cols_mri, with = FALSE])
+y_test <- df$alsftd_binary[-trainIndex]
+
+cat("=== Dataset Split ===n")
+cat("Training:", nrow(X_train_raw), "(ALS/FTD:", sum(y_train), 
+    "| non-ALS/FTD:", sum(y_train == 0), ")n")
+cat("Test:", nrow(X_test_raw), "(ALS/FTD:", sum(y_test), 
+    "| non-ALS/FTD:", sum(y_test == 0), ")nn")
+
+# ===== STEP 2: IMPUTATION WITH MICE (proper handling of test set) =====
+cat("=== Running MICE Imputation ===n")
+set.seed(123)
+mice_model <- mice(
+  as.data.frame(X_train_raw), 
+  m = 30,  # Multiple imputations for robustness
+  method = "pmm",
+  maxit = 20,
+  seed = 123,
+  print = FALSE
+)
+X_train_imp <- complete(mice_model, 1) %>% as.matrix()
+# Impute test set properly using mice predict
+cat("Imputing test set using training model...n")
+X_test_imp <- as.data.frame(X_test_raw)
+for (col in colnames(X_test_raw)) {
+  if (any(is.na(X_test_raw[, col]))) {
+    train_col_complete <- X_train_imp[, col]
+    X_test_imp[[col]][is.na(X_test_imp[[col]])] <- median(train_col_complete, na.rm = TRUE)
+  }
+}
+X_test_imp <- as.matrix(X_test_imp)
+
+saveRDS(X_train_imp, "results/alsftd_train_set_imp_mice.Rds")
+saveRDS(X_train_imp, "results/alsftd_test_set_imp_mice.Rds")
+
+cat("Training set dimensions:", dim(X_train_imp), "n")
+cat("Test set dimensions:", dim(X_test_imp), "n")
+cat("Imputation complete!nn")
+```
+
+### 5.1.1 Hyperparam Tuning
+
+```{r}
+# ===== STEP 4: HYPERPARAMETER TUNING WITH STRONG REGULARIZATION =====
+cat("=== Hyperparameter Tuning with CV ===n")
+set.seed(42)
+scale_weight <- sum(y_train == 0) / sum(y_train == 1)
+
+# Define parameter grid to search
+param_grid <- expand.grid(
+  max_depth        = c(2, 3, 5),
+  eta              = c(0.01, 0.05, 0.1),
+  min_child_weight = c(1, 3),
+  subsample        = c(0.6, 0.8),
+  colsample_bytree = c(0.5, 0.7),
+  lambda           = c(1, 5, 8),     
+  alpha            = c(0.2, 0.5, 1.0), 
+  gamma            = c(0, 2, 5, 8)       
+)
+cat("Testing", nrow(param_grid), "hyperparameter combinations...n")
+
+# Parallel CV
+n_cores <- detectCores() - 2
+cl <- makeCluster(n_cores)
+registerDoParallel(cl)
+
+cv_results <- foreach(
+  i = 1:nrow(param_grid), 
+  .combine = rbind,
+  .packages = c('xgboost')
+) %dopar% {
+  
+  params <- list(
+    objective = "binary:logistic",
+    eval_metric = "aucpr",
+    max_depth = param_grid$max_depth[i],
+    eta = param_grid$eta[i],
+    min_child_weight = param_grid$min_child_weight[i],
+    subsample = param_grid$subsample[i],
+    colsample_bytree = param_grid$colsample_bytree[i],
+    lambda = param_grid$lambda[i],
+    alpha = param_grid$alpha[i],
+    gamma = param_grid$gamma[i],
+    scale_pos_weight = scale_weight,
+    nthread = 1
+  )
+  
+  set.seed(123)
+  cv_model <- xgb.cv(
+    params = params,
+    data = xgb.DMatrix(X_train_imp, label = y_train),
+    nrounds = 300,
+    nfold = 5,
+    stratified = TRUE,
+    early_stopping_rounds = 30,
+    verbose = 0
+  )
+  
+  data.frame(
+    config = i,
+    max_depth = param_grid$max_depth[i],
+    eta = param_grid$eta[i],
+    min_child_weight = param_grid$min_child_weight[i],
+    subsample = param_grid$subsample[i],
+    colsample_bytree = param_grid$colsample_bytree[i],
+    lambda = param_grid$lambda[i],
+    alpha = param_grid$alpha[i],
+    gamma = param_grid$gamma[i],
+    best_iter = cv_model$best_iteration,
+    cv_aucpr_mean = cv_model$evaluation_log$test_aucpr_mean[cv_model$best_iteration],
+    cv_aucpr_std = cv_model$evaluation_log$test_aucpr_std[cv_model$best_iteration],
+    train_aucpr = cv_model$evaluation_log$train_aucpr_mean[cv_model$best_iteration]
+  )
+}
+stopCluster(cl)
+
+# Select best configuration (consider both mean and std)
+
+cv_results <- cv_results %>%
+  mutate(
+    train_test_gap = train_aucpr - cv_aucpr_mean,
+    score = cv_aucpr_mean - 0.5 * cv_aucpr_std - 0.4 * train_test_gap
+  ) %>%
+  arrange(desc(score))
+write.csv(cv_results, "results/alsftd_cv_results.csv")
+# cv_results <- read.csv("results/alsftd_cv_results.csv")
+
+best_config <- cv_results[1, ]
+best_config
+cat("n=== Key Metrics ===n")
+cat("CV AUC-PR:", round(best_config$cv_aucpr_mean, 3), "±", round(best_config$cv_aucpr_std, 3), "n")
+cat("Train-Test Gap:", round(best_config$train_test_gap, 3), "n")
+cat("Regularization: lambda =", best_config$lambda, "| alpha =", best_config$alpha, "| gamma =", best_config$gamma, "n")
+```
+
+### 5.1.2 Train Final Model
+
+```{r}
+cat("n=== Training Final Model ===n")
+set.seed(42)
+best_params <- list(
+  objective = "binary:logistic",
+  eval_metric = "aucpr",
+  max_depth = best_config$max_depth+1,
+  eta = best_config$eta,
+  min_child_weight = best_config$min_child_weight,
+  subsample = best_config$subsample,
+  colsample_bytree = best_config$colsample_bytree,
+  lambda = best_config$lambda,
+  alpha = best_config$alpha,
+  gamma = best_config$gamma,
+  scale_pos_weight = scale_weight
+)
+
+dtrain <- xgb.DMatrix(X_train_imp, label = y_train)
+dtest <- xgb.DMatrix(X_test_imp, label = y_test)
+
+final_model <- xgb.train(
+  params = best_params,
+  data = dtrain,
+  nrounds = best_config$best_iter,
+  watchlist = list(train = dtrain, test = dtest),
+  verbose = 0
+)
+saveRDS(final_model, "results/alsftd_final_model.Rds")
+
+# ===== EVALUATION =====
+pred_train <- predict(final_model, X_train_imp)
+pred_test <- predict(final_model, X_test_imp)
+
+metrics_train <- calc_metrics(y_train, pred_train)
+metrics_test <- calc_metrics(y_test, pred_test)
+
+# ===== VISUALIZATIONS =====
+# Learning curves
+p1 <- ggplot(final_model$evaluation_log, aes(x = iter)) +
+  geom_line(aes(y = train_aucpr, color = "Training"), linewidth = 1) +
+  geom_line(aes(y = test_aucpr, color = "Test"), linewidth = 1) +
+  geom_vline(xintercept = final_model$best_iteration, 
+             linetype = "dashed", color = "grey4", alpha = 0.5) +
+  labs(title = "Learning Curves (Regularized Model)",
+       subtitle = paste("Early stopping at iteration", final_model$best_iteration),
+       x = "Boosting Iteration", y = "AUC-PR", color = "Dataset") +
+  scale_color_manual(values = c("Training" = "#5f3e7d", "Test" = "#a96ee0")) +
+  scale_y_continuous(limits = c(0,1)) +
+  theme_bw() +
+  theme(legend.position = "bottom")
+
+# Performance comparison
+results_df <- data.frame(
+  Dataset = rep(c("CV (5-fold)", "Training", "Test"), each = 5),
+  Metric = rep(c("Accuracy", "Sensitivity", "Specificity", "F1", "AUC"), 3),
+  Value = c(
+    NA, NA, NA, NA, best_config$cv_aucpr_mean,
+    metrics_train$Accuracy, metrics_train$Sensitivity, 
+    metrics_train$Specificity, metrics_train$F1, metrics_train$AUC,
+    metrics_test$Accuracy, metrics_test$Sensitivity, 
+    metrics_test$Specificity, metrics_test$F1, metrics_test$AUC
+  )
+) %>%
+  filter(!is.na(Value)) %>%
+  mutate(Dataset = factor(Dataset, levels = c("CV (5-fold)", "Training", "Test")))
+
+p2 <- ggplot(results_df, aes(x = Metric, y = Value, fill = Dataset)) +
+  geom_bar(stat = "identity", position = "dodge", alpha = 0.7, width = 0.7, color = "grey4", stroke = 0.1) +
+  geom_hline(yintercept = 0.7, linetype = "dashed", color = "gray50") +
+  labs(title = "Regularized Model Performance",
+       subtitle = paste("Features:", length(feature_cols_mri), 
+                        "| Train-Test Gap:", 
+                        round(metrics_train$AUC - metrics_test$AUC, 3)),
+       y = "Score") +
+ scale_fill_manual(values = c("CV (5-fold)" = "#4a4a4a", 
+                                "Training" = "#5f3e7d", 
+                                "Test" = "#a96ee0")) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "bottom")
+
+cowplot::plot_grid(p1, p2, align = "hv", labels = "AUTO")
+ggsave("Figures/alsftd_regularized_performance.pdf", width = 10, height = 5)
+
+# Feature importance
+importance_df <- xgb.importance(
+  feature_names = colnames(X_train_imp), 
+  model = final_model
+) %>%
+  slice_head(n = 10) %>%
+  mutate(Feature = reorder(Feature, Gain))
+
+ggplot(importance_df, aes(x = Gain, y = Feature)) +
+  geom_col(fill = "#5f3e7d", color = "grey4", alpha = 0.7, width = 0.6) +
+  labs(title = "Feature Importance (Regularized Model)",
+       x = "Importance (Gain)", y = NULL) +
+  scale_y_discrete(labels = pretty_names) +
+  theme_bw()
+ggsave("Figures/alsftd_regularized_importance.pdf", width = 7, height = 5)
+
+# ===== SAVE RESULTS =====
+performance_table <- data.frame(
+  Dataset = c("CV (5-fold)", "Training", "Test"),
+  N = c(nrow(X_train_imp), nrow(X_train_imp), nrow(X_test_imp)),
+  N_Features = length(feature_cols_mri),
+  Accuracy = c(NA, metrics_train$Accuracy, metrics_test$Accuracy),
+  Sensitivity = c(NA, metrics_train$Sensitivity, metrics_test$Sensitivity),
+  Specificity = c(NA, metrics_train$Specificity, metrics_test$Specificity),
+  F1 = c(NA, metrics_train$F1, metrics_test$F1),
+  AUC = c(best_config$cv_aucpr_mean, metrics_train$AUC, metrics_test$AUC),
+  Overfitting_Gap = c(
+    best_config$train_test_gap,
+    NA,
+    metrics_train$AUC - metrics_test$AUC
+  )
+)
+
+write.csv(performance_table, "Figures/alsftd_regularized_results.csv", row.names = FALSE)
+write.csv(cv_results, "Figures/alsftd_cv_grid_search_results.csv", row.names = FALSE)
+print(performance_table)
+```
+
+## 5.2 SHAP Analysis for ALS/FTD
+
+```{r fig.width=8, fig.height=4}
+shap_train <- shap.values(xgb_model = final_model, X_train = X_train_imp)
+shap_test <- shap.values(xgb_model = final_model, X_train = X_test_imp)
+shap_long_train <- shap.prep(shap_contrib = shap_train$shap_score, X_train = X_train_imp, top_n = 11)
+shap_long_train$Dataset <- "Training"
+shap_long_test <- shap.prep(shap_contrib = shap_test$shap_score, X_train = X_test_imp, top_n = 11)
+shap_long_test$Dataset <- "Test"
+
+# Combine datasets
+col_shared <- intersect(unique(shap_long_train$variable), unique(shap_long_test$variable))
+shap_combined <- rbind(subset(shap_long_train, variable %in% col_shared), 
+                       subset(shap_long_test, variable %in% col_shared))
+shap_combined$Dataset <- factor(shap_combined$Dataset, levels = c("Training", "Test"))
+
+# Apply pretty labels
+shap_combined$variable_label <- pretty_names[as.character(shap_combined$variable)]
+shap_long_train$variable_label <- pretty_names[as.character(shap_long_train$variable)]
+shap_long_test$variable_label <- pretty_names[as.character(shap_long_test$variable)]
+
+# ===== SCALE rfvalue WITHIN EACH FEATURE =====
+shap_combined <- shap_combined %>%
+  group_by(variable) %>%
+  mutate(rfvalue_scaled = (rfvalue - min(rfvalue, na.rm = TRUE)) / 
+                          (max(rfvalue, na.rm = TRUE) - min(rfvalue, na.rm = TRUE)),
+         median_value = median(value)) %>%
+  ungroup()
+
+# ===== PLOT: COMBINED FACETED PLOT WITH SCALED COLORS =====
+p_shap_combined <- ggplot(shap_combined, aes(x = value, y = reorder(variable_label, mean_value))) +
+  geom_point(aes(fill = rfvalue_scaled), alpha = 0.7, size = 1, shape = 21, color = "grey4", stroke = 0.1,
+             position = position_jitter(width = 0.025, height = 0.25)) +
+  scale_fill_gradient(low = "white", high = "#5f3e7d", na.value = "grey4",
+                      name = "Feature\nValue\n(scaled)",
+                      labels = c("Low", "", "", "", "High"),
+                      breaks = c(0, 0.25, 0.5, 0.75, 1)) +
+  facet_wrap(~Dataset, ncol = 2) +
+  labs(title = "SHAP Value Comparison (ALS/FTD vs. non-ALS/FTD)",
+       x = "SHAP Value (impact on model output)",
+       y = NULL) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "gray50") +
+  # Add annotations
+  annotate("text", x = min(shap_combined$value) * 0.7, y = 1, 
+           label = "← non-ALS/FTD", fontface = "bold", size = 4) +
+  annotate("text", x = max(shap_combined$value) * 0.7, y = 1, 
+           label = "ALS/FTD →", fontface = "bold", size = 4) +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold", size = 14),
+        strip.background = element_rect(fill = "#f0f0f0"),
+        strip.text = element_text(face = "bold", size = 11))
+
+p_shap_combined
+ggsave("Figures/alsftd_shap_combined_facets.pdf", width = 10, height = 4)
+
+# ===== PLOT 3: MEAN |SHAP| COMPARISON =====
+top10_features <- names(shap_train$mean_shap_score)[1:10]
+
+mean_shap_comparison <- data.frame(
+  Feature = top10_features,
+  Feature_Label = pretty_names[top10_features],
+  Training = shap_train$mean_shap_score[top10_features],
+  Test = shap_test$mean_shap_score[top10_features]
+) %>%
+  tidyr::pivot_longer(cols = c(Training, Test),
+                      names_to = "Dataset",
+                      values_to = "Mean_SHAP") %>%
+  mutate(Feature_Label = factor(Feature_Label, 
+                                levels = rev(pretty_names[top10_features])))
+
+p_mean_shap <- ggplot(mean_shap_comparison, 
+                      aes(x = Mean_SHAP, y = Feature_Label, fill = Dataset)) +
+  geom_bar(stat = "identity", position = "dodge", alpha = 0.7, width = 0.7) +
+  labs(title = "Mean |SHAP| Values: Training vs. Test",
+       subtitle = "Similar values indicate consistent feature importance",
+       x = "Mean |SHAP| Value", y = NULL) +
+  scale_fill_manual(values = c("Training" = "#5f3e7d", "Test" = "#a96ee0")) +
+  theme_bw() +
+  theme(plot.title = element_text(hjust = 0.5, face = "bold"),
+        plot.subtitle = element_text(hjust = 0.5),
+        legend.position = "bottom")
+p_mean_shap
+ggsave("Figures/alsftd_mean_shap_comparison.pdf", width = 4, height = 4)
+
+# ===== SAVE STATISTICS =====
+rank_comparison <- data.frame(
+  Feature = top10_features,
+  Feature_Label = pretty_names[top10_features],
+  Train_Rank = 1:10,
+  Test_Rank = match(top10_features, names(shap_test$mean_shap_score)),
+  Train_SHAP = shap_train$mean_shap_score[top10_features],
+  Test_SHAP = shap_test$mean_shap_score[top10_features]
+) %>%
+  mutate(Rank_Diff = abs(Train_Rank - Test_Rank))
+
+write.csv(rank_comparison, "Figures/alsftd_shap_ranking_comparison.csv", row.names = FALSE)
+print(rank_comparison)
+```
+
+# 6 Suppl. CSF IgG:IgA Ratio Analysis
+
+```{r fig.height=5, fig.width=13, message=FALSE, warning=FALSE}
+my_comparisons <- list( c("ALS/FTD", "4R_Tau"), c("ALS/FTD", "DC"), c("ALS/FTD", "NCA"), c("4R_Tau", "AD"), c("4R_Tau", "NCA"), c("AD", "DC"))
+df$csf_ratio <- df$igglc_ig_g_im_liquor / df$igalc_ig_a_im_liquor
+
+p1 <- ggplot(df, aes(y = csf_ratio, x = diagnosis_label, fill = diagnosis_label)) + 
+  geom_boxplot(alpha = 0.6, outlier.alpha = 0) + geom_beeswarm(size = 1) + 
+  theme_bw() + theme(legend.position = "bottom") +  
+  stat_compare_means(ref.group = "4R_Tau", aes(label = after_stat(p.signif)), method = "wilcox") + 
+  scale_fill_manual(values = c("red2","red3","blue3","orange3","darkgreen","grey40", "grey20"))  +
+  labs(x = "Diagnosis Label", y = "CSF IgG:IgA", fill = "")
+
+p2 <- ggplot(df, aes(y = csf_ratio, x = dg_alsftd, fill = dg_alsftd)) + 
+  geom_boxplot(alpha = 0.6, outlier.alpha = 0) + geom_beeswarm(size = 1) +
+  theme_bw() + theme(legend.position = "bottom") +  
+  stat_compare_means(comparisons = my_comparisons, aes(label = after_stat(p.signif)), show.legend = T, method = "wilcox") + 
+  scale_fill_manual(values = c("red3","blue3","orange3","grey20")) +
+  labs(x = "Diagnosis Label (Grouped)", y = "CSF IgG:IgA", fill = "")
+
+p3 <- ggplot(df, aes(y = csf_ratio, x = log(albqc_albumin_quotient), fill = dg_alsftd)) + 
+  geom_smooth(aes(fill = dg_alsftd), color = "grey30", linetype = 2, linewidth = 0.2, alpha = 0.2, method = mgcv::gam, se = TRUE) +
+  geom_point(size = 2, shape = 21, alpha = 0.7) +
+    stat_cor(aes(color = dg_alsftd), method = "spearman", label.x = 2) +
+  scale_fill_manual(values = c("red3","blue3","orange3","grey20")) +
+    scale_color_manual(values = c("red3","blue3","orange3","grey20")) +
+    theme_bw() + theme(legend.position = "bottom") + 
+  labs(x = "log(QAlb)", y = "CSF IgG:IgA", fill = "")
+
+
+plot_grid(plotlist = list(p1,p2,p3), cols = 3, align = "h", labels = c('A','B','C'))
+ggsave("Figures/csf_igg_iga_ratio_diagnosis_dc.pdf", width = 13, height = 5)
+ggsave("Figures/csf_igg_iga_ratio_diagnosis_dc.png", width = 11, height = 4.5)
+```
+
+```{r fig.height=5, fig.width=13, message=FALSE, warning=FALSE}
+calculate_if <- function(csf_igmL, serum_iggL, qalb) {
+  qig <- csf_igmL / serum_iggL
+  qlim <- 0.93 * sqrt(qalb^2 + 6e-6) - 1.7e-3
+  ifrac <- (1 - (qlim / qig)) * 100
+  return(ifrac)
+}
+
+# Calculate IF for IgG and for IgA
+df$if_igg <- with(df, calculate_if(igglc_ig_g_im_liquor, iggsc_ig_g_im_serum, albqc_albumin_quotient))
+df$if_iga <- with(df, calculate_if(igalc_ig_a_im_liquor, igasc_ig_a_im_serum, albqc_albumin_quotient))
+
+df$csf_ratio <- df$if_igg / df$if_iga
+df$csf_ratio <- ifelse(df$csf_ratio < 0, NA, df$csf_ratio)
+
+# Now plot IF IgG and IF IgA
+p_if_igg <- ggplot(df, aes(y = csf_ratio, x = diagnosis_label, fill = diagnosis_label)) +
+  geom_boxplot(alpha = 0.6, outlier.alpha = 0) + geom_beeswarm(size = 1) +
+  theme_bw() + theme(legend.position = "bottom") +  
+  stat_compare_means(ref.group = "ALS", aes(label = after_stat(p.signif)), method = "wilcox") +
+  scale_fill_manual(values = c("red2","red3","blue3","orange3","darkgreen","grey40", "grey20")) +
+  labs(x = "Diagnosis Label", y = "IF-IgG: IF-IgA", fill = "")
+
+p_if_iga <- ggplot(df, aes(y = csf_ratio, x = dg_alsftd, fill = dg_alsftd)) + 
+  geom_boxplot(alpha = 0.6, outlier.alpha = 0) + geom_beeswarm(size = 1) +
+  theme_bw() + theme(legend.position = "bottom") +  
+  stat_compare_means(comparisons = my_comparisons, aes(label = after_stat(p.signif)), show.legend = T, method = "wilcox") + 
+  scale_fill_manual(values = c("red3","blue3","orange3","grey20")) +
+  labs(x = "Diagnosis Label", y = "IF-IgG: IF-IgA", fill = "")
+
+plot_grid(plotlist = list(p_if_igg, p_if_iga), cols = 2, align = "h", labels = c('D','E'))
+ggsave("Figures/csf_igg_iga_ratio_diagnosis_dc_d_e.png", width = 9, height = 4.5)
+```
+
+
+# 7 Suppl. Lm interaction
+
+```{r}
+library(tidyverse)
+library(broom)
+
+test_age_interaction <- function(biomarker) {
+  model <- lm(as.formula(paste(biomarker, "~ alsftd_binary * age_at_report")), data = df)
+  broom::tidy(model) %>%
+    filter(term == "alsftd_binary:age_at_report") %>%
+    mutate(biomarker = biomarker) %>%
+    select(biomarker, estimate, std.error, p.value)
+}
+
+test_sex_interaction <- function(biomarker) {
+  model <- lm(as.formula(paste(biomarker, "~ alsftd_binary * sex")), data = df)
+  broom::tidy(model) %>%
+    filter(term == "alsftd_binary:sexM") %>%
+    mutate(biomarker = biomarker) %>%
+    select(biomarker, estimate, std.error, p.value)
+}
+
+age_results <- map_df(feature_cols_mri, test_age_interaction) %>%
+  mutate(p.adjusted = p.adjust(p.value, method = "fdr")) %>%
+  mutate(model = "ALS/FTD x age at LP") %>% arrange(p.adjusted)
+
+sex_results <- map_df(feature_cols_mri, test_sex_interaction) %>%
+  mutate(p.adjusted = p.adjust(p.value, method = "fdr")) %>%
+  mutate(model = "ALS/FTD x sexM")%>% arrange(p.adjusted)
+
+sum_tbl <- rbind(age_results, sex_results)
+
+sum_tbl
+```
+
+
+# 8 Suppl. Box Plots
+
+```{r}
+# Create separate dataframes for each group
+df_als <- df %>% 
+  filter(diagnosis_label == "ALS") %>%
+  mutate(group5 = "ALS")
+
+df_ftd <- df %>% 
+  filter(diagnosis_label == "FTD") %>%
+  mutate(group5 = "FTD")
+
+df_alsftd_combined <- df %>% 
+  filter(diagnosis_label %in% c("ALS", "FTD", "ALS/FTD")) %>%  # ALL spectrum patients
+  mutate(group5 = "ALS/FTD")
+
+df_dc <- df %>% 
+  filter(dg_alsftd == "DC") %>%
+  mutate(group5 = "DC")
+
+df_nca <- df %>% 
+  filter(dg_alsftd == "NCA") %>%
+  mutate(group5 = "NCA")
+
+# Bind rows together (ALS and FTD patients appear TWICE: once in their own group, once in ALS/FTD)
+data5 <- bind_rows(df_als, df_ftd, df_alsftd_combined, df_dc, df_nca) %>%
+  mutate(group5 = factor(group5, levels = c("ALS", "FTD", "ALS/FTD", "DC", "NCA")))
+table(data5$group5)
+
+# === PLOTTING ===
+feature_cols_mri_ <- feature_cols_mri[!feature_cols_mri %in% c("dm", "aht", "ckd", "tbi", "neoplastic", "autoimmune")]
+n_biomarkers <- length(feature_cols_mri_)
+n_per_page <- ceiling(n_biomarkers / 2)
+biomarkers_page1 <- feature_cols_mri_[1:n_per_page]
+biomarkers_page2 <- feature_cols_mri_[(n_per_page + 1):n_biomarkers]
+
+# Define fill colors
+group5_fills <- c(
+  "ALS"     = "red2",
+  "FTD"     = "red3",
+  "ALS/FTD" = "purple3",
+  "DC"      = "orange3",
+  "NCA"     = "grey20"
+)
+
+# Function for panel
+make_biomarker_panel <- function(data, biomarker_cols, group_var = "group5", 
+                                  fill_palette = group5_fills, ncol = 3) {
+  
+  plots <- lapply(biomarker_cols, function(bm) {
+    ggplot(data, aes_string(x = group_var, y = bm, fill = group_var)) +
+      geom_boxplot(outlier.alpha = 0, alpha = 0.6) +
+      scale_fill_manual(values = fill_palette) +
+      labs(x = NULL, y = NULL, title = bm) +
+      theme_bw(base_size = 10) +
+      theme(
+        plot.title = element_text(hjust = 0.5, size = 9, face = "bold"),
+        axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1, size = 8),
+        legend.position = "none"
+      )
+  })
+  legend_plot <- ggplot(data, aes_string(x = group_var, fill = group_var)) +
+    geom_bar() +
+    scale_fill_manual(values = fill_palette) +
+    guides(fill = guide_legend(title = NULL, nrow = 1)) +
+    theme_void() +
+    theme(legend.position = "bottom", legend.text = element_text(size = 10))
+  legend <- get_legend(legend_plot)
+  panel <- plot_grid(plotlist = plots, ncol = ncol, align = "hv")
+  plot_grid(panel, legend, ncol = 1, rel_heights = c(1, 0.08))
+}
+
+# Create
+page1 <- make_biomarker_panel(data5, biomarkers_page1, ncol = 3)
+page2 <- make_biomarker_panel(data5, biomarkers_page2, ncol = 3)
+
+# Export  multi-page pdf
+pdf("Figures/mri_biomarker_panel_5groups.pdf", width = 8.27, height = 11.69)
+print(page1)
+print(page2)
+dev.off()
+
+ggsave("Figures/mri_biomarker_panel_5groups_page1.png", 
+       plot = page1, 
+       width = 8.27, 
+       height = 11.69, 
+       dpi = 300)
+
+ggsave("Figures/mri_biomarker_panel_5groups_page2.png", 
+       plot = page2, 
+       width = 8.27, 
+       height = 11.69, 
+       dpi = 300)
+```
+
+```{r}
+sessionInfo()
+```
