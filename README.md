@@ -6,7 +6,7 @@ A Real-World Data Approach to Establish an ALS/FTD Classification Model
 ALS and FTD lie on a spectrum, and differential diagnosis can be challenging given strong phenotypical overlap with other neurodegenerative diseases.
 In this study, we explore the predictive ability of real-world routine clinical data to effectively diagnose the ALS/FTD spectrum.
 
-**Towards an Effective Multimodal Panel for the Diagnosis of the Amyotrophic Lateral Sclerosis / Frontotemporal Dementia Spectrum** \
+**Multimodal Biomarker Characterization of the ALS/FTD Spectrum: A Real-World Clinical Dataset Analysis** \
 *Preprint/Paper Link - TBD*
 
 
